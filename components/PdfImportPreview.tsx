@@ -1,19 +1,22 @@
 'use client';
 
 import React, { useState, useRef } from 'react';
-
-interface PdfPageData {
+ interface PdfPageData {
   pageNumber: number;
   content: string;
 }
-
 interface PdfImportPreviewProps {
   onPdfProcessed: (data: PdfPageData[]) => void;
 }
 
+interface PdfInternalData {
+  numPages: number;
+  pageTexts: string[];
+}
+
 const PdfImportPreview: React.FC<PdfImportPreviewProps> = ({ onPdfProcessed }) => {
   const [file, setFile] = useState<File | null>(null);
-  const [pdfData, setPdfData] = useState<{ numPages: number; pageTexts: string[] } | null>(null);
+  const [pdfData, setPdfData] = useState<PdfInternalData | null>(null);
   const [currentPage, setCurrentPage] = useState<number>(1);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
@@ -28,105 +31,255 @@ const PdfImportPreview: React.FC<PdfImportPreviewProps> = ({ onPdfProcessed }) =
     onPdfProcessed([]);
   };
 
+  const hasMyanmarText = (texts: string[]): boolean => {
+    const myanmarRegex = /[\u1000-\u109F\uA9E0-\uA9FF\uAA60-\uAA7F]/;
+    return texts.some((text) => myanmarRegex.test(text));
+  };
+
+  const extractTextWithPdfJs = async (pdf: any): Promise<string[]> => {
+    const pageTexts: string[] = [];
+
+    for (let i = 1; i <= pdf.numPages; i++) {
+      const page = await pdf.getPage(i);
+      const textContent = await page.getTextContent();
+
+      let text = '';
+
+      // join items in order
+      for (const item of textContent.items) {
+        if (typeof (item as any).str === 'string') {
+          text += (item as any).str;
+        }
+      }
+
+      // Keep structure simple; do not over-normalize
+      // Optional: trim trailing spaces
+      text = text.replace(/\s+$/g, '');
+
+      // Try to normalize Unicode composition (helps Myanmar)
+      try {
+        text = text.normalize('NFC');
+      } catch {
+        // ignore if environment doesn't support normalize
+      }
+
+      pageTexts.push(text);
+    }
+
+    return pageTexts;
+  };
+
+  const runMyanmarOcrOnPdf = async (
+    pdf: any,
+    updateStatus: (msg: string) => void
+  ): Promise<string[]> => {
+    const Tesseract = await import('tesseract.js');
+    const { createWorker } = Tesseract;
+
+    const langPaths = [
+      'https://tessdata.projectnaptha.com/4.0.0/',
+      'https://cdn.jsdelivr.net/npm/tesseract.js@v4.0.2/lang-data/4.0.0/',
+      'https://raw.githubusercontent.com/naptha/tessdata/gh-pages/4.0.0/',
+    ];
+
+    let worker: any = null;
+    let lastError: any = null;
+
+    for (const path of langPaths) {
+      try {
+        worker = await createWorker('mya', 1, {
+          oem: 1,
+          langPath: path,
+          logger: (m: any) => console.log('OCR Progress:', m),
+        });
+        break;
+      } catch (err) {
+        console.warn(`Failed to load language data from ${path}:`, err);
+        lastError = err;
+      }
+    }
+
+    if (!worker) {
+      throw new Error(
+        `Failed to load Myanmar language data for OCR. Last error: ${lastError?.message}`
+      );
+    }
+
+    const pageTexts: string[] = [];
+
+    try {
+      for (let i = 1; i <= pdf.numPages; i++) {
+        updateStatus(`Processing page ${i} of ${pdf.numPages} with OCR…`);
+
+        const page = await pdf.getPage(i);
+        const scale = 2; // decent quality vs speed
+        const viewport = page.getViewport({ scale });
+
+        const canvas = document.createElement('canvas');
+        const context = canvas.getContext('2d');
+        if (!context) {
+          canvas.remove();
+          pageTexts.push('');
+          continue;
+        }
+
+        canvas.height = viewport.height;
+        canvas.width = viewport.width;
+
+        await page.render({ canvasContext: context, viewport }).promise;
+
+        try {
+          const imageData = canvas.toDataURL('image/png');
+          const result = await worker.recognize(imageData, {
+            tessjs_create_pdf: '0',
+          });
+          let text = result.data.text || '';
+          try {
+            text = text.normalize('NFC');
+          } catch {
+            // ignore
+          }
+          pageTexts.push(text);
+        } catch (ocrErr) {
+          console.error(`OCR failed on page ${i}:`, ocrErr);
+          pageTexts.push('');
+        } finally {
+          canvas.remove();
+        }
+      }
+    } finally {
+      try {
+        await worker.terminate();
+      } catch (e) {
+        console.warn('Error terminating OCR worker:', e);
+      }
+    }
+
+    return pageTexts;
+  };
+
+  const processPdfFile = async (selectedFile: File) => {
+    setIsLoading(true);
+    setError(null);
+
+    let workerBlobUrl: string | null = null;
+
+    try {
+      const pdfjsLib = await import('pdfjs-dist');
+      const workerModule = await import('pdfjs-dist/build/pdf.worker.mjs');
+
+      workerBlobUrl = URL.createObjectURL(
+        new Blob([workerModule.default], { type: 'application/javascript' })
+      );
+      (pdfjsLib as any).GlobalWorkerOptions.workerSrc = workerBlobUrl;
+
+      const typedArray = await selectedFile.arrayBuffer();
+      const pdf = await (pdfjsLib as any).getDocument({
+        data: typedArray,
+        enableXfa: true,
+        disableFontFace: false,
+        cMapUrl: 'https://unpkg.com/pdfjs-dist@4.0.379/cmaps/',
+        cMapPacked: true,
+        isEvalSupported: false,
+      }).promise;
+
+      // 1) Try normal text extraction
+      let pageTexts = await extractTextWithPdfJs(pdf);
+
+      const anyNonEmpty = pageTexts.some((t) => t.trim() !== '');
+      const hasMyanmarChars = hasMyanmarText(pageTexts);
+
+      if (!anyNonEmpty || !hasMyanmarChars) {
+        console.log('Standard extraction failed to find Myanmar text – using OCR');
+        setError('Standard text extraction failed. Running OCR for Myanmar text (may be slower)…');
+
+        pageTexts = await runMyanmarOcrOnPdf(pdf, (msg) => setError(msg));
+      }
+
+      setPdfData({
+        numPages: pdf.numPages,
+        pageTexts,
+      });
+
+      const dataset: PdfPageData[] = pageTexts.map((content, index) => ({
+        pageNumber: index + 1,
+        content,
+      }));
+
+      onPdfProcessed(dataset);
+    } catch (err: any) {
+      console.error('Error processing PDF:', err);
+      setError(
+        'Failed to process PDF. The file may be corrupted, image-only, or use unsupported fonts/encoding for Myanmar text.'
+      );
+    } finally {
+      setIsLoading(false);
+      if (workerBlobUrl) {
+        try {
+          URL.revokeObjectURL(workerBlobUrl);
+        } catch (e) {
+          console.warn('Could not revoke worker URL:', e);
+        }
+      }
+    }
+  };
+
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     resetState();
     const selectedFile = e.target.files?.[0];
 
     if (!selectedFile) return;
 
-    // Check if the file is a PDF
     if (selectedFile.type !== 'application/pdf') {
       setError('Please select a valid PDF file.');
       return;
     }
 
-    if (selectedFile.size > 10 * 1024 * 1024) { // 10MB limit
-      setError('File size exceeds 10MB limit. Please select a smaller file.');
+    if (selectedFile.size > 20 * 1024 * 1024) {
+      setError('File size exceeds 20MB limit. Please select a smaller file.');
       return;
     }
 
     setFile(selectedFile);
-    setIsLoading(true);
-    setError(null);
-
-    try {
-      const pdfjsLib = await import('pdfjs-dist');
-      const { getDocument } = pdfjsLib;
-      const worker = await import('pdfjs-dist/build/pdf.worker.mjs');
-      pdfjsLib.GlobalWorkerOptions.workerSrc = URL.createObjectURL(
-        new Blob([worker.default], { type: 'application/javascript' })
-      );
-
-      const typedArray = await selectedFile.arrayBuffer();
-      const pdf = await pdfjsLib.getDocument(typedArray).promise;
-
-      const pageTexts: string[] = [];
-      
-      for (let i = 1; i <= pdf.numPages; i++) {
-        const page = await pdf.getPage(i);
-        const textContent = await page.getTextContent();
-        const text = textContent.items.map((item: any) => item.str).join(' ');
-        pageTexts.push(text);
-      }
-
-      setPdfData({
-        numPages: pdf.numPages,
-        pageTexts
-      });
-
-      // Output the dataset: { pageNumber, content }
-      const dataset: PdfPageData[] = pageTexts.map((content, index) => ({
-        pageNumber: index + 1,
-        content
-      }));
-      
-      onPdfProcessed(dataset);
-    } catch (err) {
-      console.error('Error processing PDF:', err);
-      setError('Failed to process PDF. The file may be corrupted or invalid.');
-    } finally {
-      setIsLoading(false);
-    }
+    await processPdfFile(selectedFile);
   };
 
   const goToPage = (page: number) => {
-    if (pdfData && page >= 1 && page <= pdfData.numPages) {
-      setCurrentPage(page);
-    }
+    if (!pdfData) return;
+    if (page < 1 || page > pdfData.numPages) return;
+    setCurrentPage(page);
   };
 
-  const handleExport = () => {
-    if (!pdfData || !pdfData.pageTexts || pdfData.pageTexts.length === 0) {
+  const handleExportFromComponent = () => {
+    if (!pdfData || !pdfData.pageTexts.length) {
       setError('No data to export. Please process a PDF file first.');
       return;
     }
 
-    // Create the dataset to export
     const dataset: PdfPageData[] = pdfData.pageTexts.map((content, index) => ({
       pageNumber: index + 1,
-      content
+      content,
     }));
 
-    // Convert to JSON string
-    const jsonString = JSON.stringify(dataset, null, 2);
+    const blob = new Blob([JSON.stringify(dataset, null, 2)], {
+      type: 'application/json',
+    });
 
-    // Create a blob and download link
-    const blob = new Blob([jsonString], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `extracted-pdf-content.json`;
-    document.body.appendChild(link);
-    link.click();
-
-    // Clean up
-    document.body.removeChild(link);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = file
+      ? `${file.name.replace(/\.pdf$/i, '')}-dataset.json`
+      : 'extracted-pdf-content.json';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
     URL.revokeObjectURL(url);
   };
 
   return (
     <div className="max-w-4xl mx-auto p-6 bg-white rounded-lg shadow-lg">
-      <h2 className="text-2xl font-bold mb-6 text-gray-800">PDF Import Preview</h2>
+      <h2 className="text-2xl font-bold mb-6 text-gray-800">PDF Import & Preview</h2>
 
       <div className="mb-6">
         <input
@@ -162,35 +315,39 @@ const PdfImportPreview: React.FC<PdfImportPreviewProps> = ({ onPdfProcessed }) =
             <p className="mb-2 text-sm text-gray-500">
               <span className="font-semibold">Click to upload</span> or drag and drop
             </p>
-            <p className="text-xs text-gray-500">
-              PDF file (MAX. 10MB)
-            </p>
+            <p className="text-xs text-gray-500">PDF file (MAX. 20MB)</p>
+            {file && (
+              <p className="mt-3 text-xs text-gray-600">
+                Selected: <span className="font-medium">{file.name}</span> (
+                {(file.size / (1024 * 1024)).toFixed(2)} MB)
+              </p>
+            )}
           </div>
         </label>
 
         {error && (
-          <p className="mt-2 text-sm text-red-600">{error}</p>
+          <p className="mt-2 text-sm text-red-600 whitespace-pre-line">{error}</p>
         )}
       </div>
 
       {isLoading && (
         <div className="flex justify-center my-8">
-          <div className="w-12 h-12 border-4 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
+          <div className="w-12 h-12 border-4 border-blue-500 border-t-transparent rounded-full animate-spin" />
         </div>
       )}
 
       {pdfData && !isLoading && (
         <div className="space-y-6">
-          <div className="flex items-center justify-between">
+          <div className="flex flex-wrap items-center justify-between gap-3">
             <h3 className="text-xl font-semibold text-gray-700">
               Page {currentPage} of {pdfData.numPages}
             </h3>
 
-            <div className="flex space-x-2">
+            <div className="flex flex-wrap gap-2 items-center">
               <button
                 onClick={() => goToPage(currentPage - 1)}
                 disabled={currentPage <= 1}
-                className={`px-4 py-2 rounded-md ${
+                className={`px-4 py-2 rounded-md text-sm ${
                   currentPage <= 1
                     ? 'bg-gray-200 text-gray-400 cursor-not-allowed'
                     : 'bg-blue-500 text-white hover:bg-blue-600'
@@ -202,7 +359,7 @@ const PdfImportPreview: React.FC<PdfImportPreviewProps> = ({ onPdfProcessed }) =
               <button
                 onClick={() => goToPage(currentPage + 1)}
                 disabled={currentPage >= pdfData.numPages}
-                className={`px-4 py-2 rounded-md ${
+                className={`px-4 py-2 rounded-md text-sm ${
                   currentPage >= pdfData.numPages
                     ? 'bg-gray-200 text-gray-400 cursor-not-allowed'
                     : 'bg-blue-500 text-white hover:bg-blue-600'
@@ -210,34 +367,58 @@ const PdfImportPreview: React.FC<PdfImportPreviewProps> = ({ onPdfProcessed }) =
               >
                 Next
               </button>
+
+              <div className="flex items-center space-x-2">
+                <span className="text-sm text-gray-600">Go to:</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={pdfData.numPages}
+                  value={currentPage}
+                  onChange={(e) => {
+                    const v = Number(e.target.value);
+                    if (!Number.isNaN(v)) goToPage(v);
+                  }}
+                  className="w-20 border rounded px-2 py-1 text-sm"
+                />
+              </div>
             </div>
           </div>
 
           <div className="border rounded-lg p-4 bg-gray-50 max-h-[500px] overflow-y-auto">
-            <div className="text-gray-700 whitespace-pre-wrap">
+            <pre className="text-gray-800 text-sm whitespace-pre-wrap">
               {pdfData.pageTexts[currentPage - 1]}
-            </div>
+            </pre>
           </div>
 
           <div className="flex flex-wrap gap-3 justify-between items-center">
             <div className="text-sm text-gray-600">
-              Total Pages: {pdfData.numPages}
+              Total Pages: <span className="font-semibold">{pdfData.numPages}</span>
             </div>
 
-            <div className="flex space-x-3">
+            <div className="flex flex-wrap gap-3">
               <button
-                onClick={handleExport}
-                className="px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 transition-colors flex items-center"
+                onClick={handleExportFromComponent}
+                className="px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 transition-colors flex items-center text-sm"
               >
-                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-2" viewBox="0 0 20 20" fill="currentColor">
-                  <path fillRule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm3.293-7.707a1 1 0 011.414 0L9 10.586V3a1 1 0 112 0v7.586l1.293-1.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z" clipRule="evenodd" />
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  className="h-4 w-4 mr-2"
+                  viewBox="0 0 20 20"
+                  fill="currentColor"
+                >
+                  <path
+                    fillRule="evenodd"
+                    d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm3.293-7.707a1 1 0 011.414 0L9 10.586V3a1 1 0 112 0v7.586l1.293-1.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z"
+                    clipRule="evenodd"
+                  />
                 </svg>
                 Export JSON
               </button>
 
               <button
                 onClick={resetState}
-                className="px-4 py-2 bg-red-500 text-white rounded-md hover:bg-red-600 transition-colors"
+                className="px-4 py-2 bg-red-500 text-white rounded-md hover:bg-red-600 transition-colors text-sm"
               >
                 Reset
               </button>

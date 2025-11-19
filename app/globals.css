@@ -17,3 +17,18 @@ body {
     )
     rgb(var(--background-start-rgb));
 }
+
+/* Ensure proper display of complex scripts like Myanmar */
+.text-display {
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
+  line-height: 1.6;
+  word-break: break-word;
+  overflow-wrap: break-word;
+}
+
+/* For Myanmar text specifically */
+.myanmar-text {
+  font-family: 'Myanmar MN', 'Myanmar Text', 'Padauk', 'Noto Sans Myanmar', sans-serif;
+  direction: ltr;
+  text-align: left;
+}
