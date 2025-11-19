@@ -50,7 +50,7 @@ The project requires the following dependencies:
 
 The `PdfImportPreview` component accepts the following props:
 
-- `onPdfProcessed`: A callback function that receives an array of objects in the format `{ pageNumber: number, content: string }` when the PDF has been processed successfully.
+- `onPdfProcessed`: A callback function that receives an array of objects in the format `{ pageNumber: number, content: { [index: string]: string }[] }` when the PDF has been processed successfully.
 
 ## Export Functionality
 
@@ -59,15 +59,25 @@ The component includes an "Export JSON" button that allows users to download the
 [
   {
     "pageNumber": 1,
-    "content": "text extracted from page 1"
+    "content": [ {"0": "first row of text"}, {"1": "second row of text"}, {"2": "third row of text"} ]
   },
   {
     "pageNumber": 2,
-    "content": "text extracted from page 2"
+    "content": [ {"0": "first row of text"}, {"1": "second row of text"}, {"2": "third row of text"} ]
   },
   ...
 ]
 ```
+
+## Features
+
+- PDF file upload with validation
+- Page-by-page preview of PDF content
+- Text extraction from each page, split into rows
+- Error handling for invalid/corrupted PDFs
+- Responsive UI with Tailwind CSS
+- Output dataset with page numbers and extracted content as row-based arrays
+- Export extracted content as JSON file
 
 ## File Structure
 

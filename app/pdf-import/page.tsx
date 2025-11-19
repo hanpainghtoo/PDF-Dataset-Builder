@@ -2,9 +2,14 @@
 
 import React, { useState } from 'react';
 import PdfImportPreview from '../../components/PdfImportPreview';
- interface PdfPageData {
+
+interface PdfRow {
+  [index: string]: string;
+}
+
+interface PdfPageData {
   pageNumber: number;
-  content: string;
+  content: PdfRow[];
 }
 
 const PdfImportPage: React.FC = () => {
@@ -72,9 +77,12 @@ const PdfImportPage: React.FC = () => {
                   <h3 className="font-semibold text-gray-700">
                     Page {page.pageNumber}
                   </h3>
-                  <p className="text-gray-600 mt-1 line-clamp-2">
-                    {page.content.substring(0, 200)}
-                    {page.content.length > 200 ? '…' : ''}
+                  <p className="text-gray-600 mt-1">
+                    {/* Display first few rows of content as preview */}
+                    {page.content.length > 0 && (
+                      <>{Object.values(page.content[0])[0].substring(0, 200)}</>
+                    )}
+                    {page.content.length > 0 && Object.values(page.content[0])[0].length > 200 && '…'}
                   </p>
                 </div>
               ))}

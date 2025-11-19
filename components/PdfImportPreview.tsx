@@ -1,9 +1,13 @@
 'use client';
 
 import React, { useState, useRef } from 'react';
- interface PdfPageData {
+interface PdfRow {
+  [index: string]: string;
+}
+
+interface PdfPageData {
   pageNumber: number;
-  content: string;
+  content: PdfRow[];
 }
 interface PdfImportPreviewProps {
   onPdfProcessed: (data: PdfPageData[]) => void;
@@ -11,7 +15,8 @@ interface PdfImportPreviewProps {
 
 interface PdfInternalData {
   numPages: number;
-  pageTexts: string[];
+  pageTexts: string[]; // Raw extracted text from PDF pages
+  processedData?: PdfPageData[]; // Processed data in the requested format
 }
 
 const PdfImportPreview: React.FC<PdfImportPreviewProps> = ({ onPdfProcessed }) => {
@@ -77,8 +82,8 @@ const PdfImportPreview: React.FC<PdfImportPreviewProps> = ({ onPdfProcessed }) =
     const { createWorker } = Tesseract;
 
     const langPaths = [
+      'https://cdn.jsdelivr.net/npm/tesseract.js@4.0.2/lang-data/',
       'https://tessdata.projectnaptha.com/4.0.0/',
-      'https://cdn.jsdelivr.net/npm/tesseract.js@v4.0.2/lang-data/4.0.0/',
       'https://raw.githubusercontent.com/naptha/tessdata/gh-pages/4.0.0/',
     ];
 
@@ -88,7 +93,6 @@ const PdfImportPreview: React.FC<PdfImportPreviewProps> = ({ onPdfProcessed }) =
     for (const path of langPaths) {
       try {
         worker = await createWorker('mya', 1, {
-          oem: 1,
           langPath: path,
           logger: (m: any) => console.log('OCR Progress:', m),
         });
@@ -196,15 +200,27 @@ const PdfImportPreview: React.FC<PdfImportPreviewProps> = ({ onPdfProcessed }) =
         pageTexts = await runMyanmarOcrOnPdf(pdf, (msg) => setError(msg));
       }
 
+      // Convert each page's text into a row-based format
+      const dataset: PdfPageData[] = pageTexts.map((content, index) => {
+        // Split content by newlines to create rows
+        const rows = content.split('\n').filter(row => row.trim() !== '');
+
+        // Convert each row into an indexed object format
+        const rowArray: PdfRow[] = rows.map((row, rowIndex) => ({
+          [rowIndex.toString()]: row.trim()
+        }));
+
+        return {
+          pageNumber: index + 1,
+          content: rowArray,
+        };
+      });
+
       setPdfData({
         numPages: pdf.numPages,
         pageTexts,
+        processedData: dataset,
       });
-
-      const dataset: PdfPageData[] = pageTexts.map((content, index) => ({
-        pageNumber: index + 1,
-        content,
-      }));
 
       onPdfProcessed(dataset);
     } catch (err: any) {
@@ -251,17 +267,12 @@ const PdfImportPreview: React.FC<PdfImportPreviewProps> = ({ onPdfProcessed }) =
   };
 
   const handleExportFromComponent = () => {
-    if (!pdfData || !pdfData.pageTexts.length) {
+    if (!pdfData || !pdfData.processedData || !pdfData.processedData.length) {
       setError('No data to export. Please process a PDF file first.');
       return;
     }
 
-    const dataset: PdfPageData[] = pdfData.pageTexts.map((content, index) => ({
-      pageNumber: index + 1,
-      content,
-    }));
-
-    const blob = new Blob([JSON.stringify(dataset, null, 2)], {
+    const blob = new Blob([JSON.stringify(pdfData.processedData, null, 2)], {
       type: 'application/json',
     });
 
@@ -387,7 +398,12 @@ const PdfImportPreview: React.FC<PdfImportPreviewProps> = ({ onPdfProcessed }) =
 
           <div className="border rounded-lg p-4 bg-gray-50 max-h-[500px] overflow-y-auto">
             <pre className="text-gray-800 text-sm whitespace-pre-wrap">
-              {pdfData.pageTexts[currentPage - 1]}
+              {(() => {
+                // Convert the page text to row format for display
+                const pageContent = pdfData.pageTexts[currentPage - 1];
+                const rows = pageContent.split('\n').filter(row => row.trim() !== '');
+                return rows.join('\n');
+              })()}
             </pre>
           </div>
 
