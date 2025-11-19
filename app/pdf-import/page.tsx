@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState } from 'react';
-import PdfImportPreview from '@/components/PdfImportPreview';
+import PdfImportPreview from '../../components/PdfImportPreview';
 
 interface PdfPageData {
   pageNumber: number;
